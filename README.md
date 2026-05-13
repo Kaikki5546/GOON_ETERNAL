@@ -1,10 +1,10 @@
-# 🩸 GOON ETERNAL
+# GOON ETERNAL
 
-> *A gothic raycaster shooter — survive 10 levels and defeat DRACULA.*
+> *A gothic raycaster shooter -- survive 10 levels and defeat DRACULA.*
 
 ---
 
-## 👥 Ihmiset projektin takana
+## Ihmiset projektin takana
 
 | Nimi |
 |------|
@@ -15,47 +15,59 @@
 
 ---
 
-## ⚙️ Vaatimukset
+## Vaatimukset
 
 ### Python
-- **Python 3.10 – 3.13.x** (ei uudempaa kuin 3.13.x)
+- **Python 3.10 - 3.13.x** (ei uudempaa kuin 3.13.x)
 
 ### Riippuvuudet
 
-Asenna tarvittavat kirjastot komennolla:
+Asenna tarvittavat kirjastot alla olevalla komennolla.
+
+> **Huom Python-versiosta:** Jos sinulla on useita Python-versioita asennettuna, kayta versiota vastaavaa pip-komentoa. Esimerkiksi Python 3.11:lla `pip3.11 install pygame pypresence`, Python 3.12:lla `pip3.12 install pygame pypresence`. Windowsilla kokeile ensin `py -3.11 -m pip install pygame pypresence`.
 
 ```bash
 pip install pygame pypresence
 ```
 
-| Kirjasto | Käyttötarkoitus |
-|----------|----------------|
-| `pygame` | Peli-ikkuna, grafiikka, äänet, syötteet |
-| `pypresence` | Discord Rich Presence -tuki |
+Jos `pip` ei toimi, kokeile:
+
+```bash
+python -m pip install pygame pypresence
+```
+
+| Kirjasto | Versio | Kayttotarkoitus |
+|----------|--------|----------------|
+| `pygame` | >= 2.5 | Peli-ikkuna, grafiikka, aanet, syotteet |
+| `pypresence` | >= 4.3 | Discord Rich Presence -tuki |
 
 ### Standardikirjastot (ei asenneta erikseen)
-Peli käyttää myös seuraavia Pythonin mukana tulevia kirjastoja:
 `math`, `sys`, `random`, `time`, `os`, `heapq`, `json`
 
 ---
 
-## 📁 Tiedostorakenne
+## Tiedostorakenne
 
 ```
 GOON_ETERNAL/
-├── GOON_ETERNAL.py
-├── savegame.json          ← Luodaan automaattisesti tallennettaessa
-└── media/
-    ├── load.png           ← Latausruudun kuva / Discord RPC -kuva
-    ├── (muut kuvatiedostot)
-    └── (äänipätkät: death1-5.wav, 2-death.wav, 2-death2.wav, jne.)
++-- GOON_ETERNAL.py
++-- savegame.json          <- Luodaan automaattisesti tallennettaessa
++-- settings.json          <- Luodaan automaattisesti asetuksia muuttaessa
++-- highscores.json        <- Luodaan automaattisesti pelin jalkeen
++-- media/
+    +-- load.png           <- Latausruudun kuva / Discord RPC -kuva
+    +-- pistol.png         <- Pistooliase
+    +-- shotgun.png        <- Haulikkokase
+    +-- smg.png            <- Konepistooli
+    +-- (muut kuvatiedostot)
+    +-- (aanipatkAt: death1-5.wav, 2-death.wav, shot.wav, jne.)
 ```
 
 > **Huom:** `media/`-kansio tulee olla samassa hakemistossa kuin `GOON_ETERNAL.py`.
 
 ---
 
-## 🚀 Käynnistys
+## Kaynnistys
 
 ```bash
 python GOON_ETERNAL.py
@@ -63,44 +75,114 @@ python GOON_ETERNAL.py
 
 ---
 
-## 🎮 Ohjaimet
+## Ohjaimet
 
-| Näppäin / Toiminto | Kuvaus |
-|--------------------|--------|
-| `W / A / S / D` | Liiku / straffe |
-| `Hiiri` | Käännä katsetta |
+### Liikkuminen
+
+| Nappain | Kuvaus |
+|---------|--------|
+| `W` / `S` | Liiku eteen / taakse |
+| `A` / `D` | Straffe vasemmalle / oikealle |
+| `Hiiri` | Kaanna katsetta |
+| `Vasen / Oikea nuolinappain` | Kaanna katsetta (vaihtoehto hiirelle) |
+| `SHIFT` | Sprinttaa (kuluttaa kestavyytta) |
+
+### Taistelu
+
+| Nappain | Kuvaus |
+|---------|--------|
 | `Vasen hiirinappi` tai `SPACE` | Ammu |
-| `E` | Avaa ovi |
-| `SHIFT` | Sprinttaa |
-| `ESC` | Pauseta / valikko |
+| `1` | Vaihda aseeksi Pistooli (128 luotia, 2 dmg/laukaus) |
+| `2` | Vaihda aseeksi Haulikko (64 patruunaa, 3 dmg/laukaus) |
+| `3` | Vaihda aseeksi Konepistooli / SMG (256 luotia, 1 dmg/laukaus) |
+| `Hiiren rulla` | Selaa aseita |
+
+### Maailma ja valikot
+
+| Nappain | Kuvaus |
+|---------|--------|
+| `E` | Avaa ovi / kayta parannusasemaa |
+| `ESC` | Pauseta / avaa valikko |
+| `R` | Aloita alusta (kuoleman jalkeen) |
+| `L` | Nayta / piilota FPS-laskuri |
+| `TAB` | Vaihda tulostaulun jarjestys (voittoruudussa) |
+
+### Ammukset
+
+Jokainen ase kayttaa omaa ammustyyppian. Ammolaatikot antavat kaikille aseille ammuksia samanaikaisesti:
+
+| Ase | Ammustyyppi | Maksimi | Laatikosta |
+|-----|-------------|---------|------------|
+| Pistooli | Pistoolin patruunat | 128 | +8 |
+| Haulikko | Haulikon patruunat | 64 | +4 |
+| SMG | SMG-patruunat | 256 | +16 |
+
+> Ammo-kapasiteettia voi kasvattaa **Max Ammo +12%** -parannuksella (kasvattaa kaikkia).
 
 ---
 
-## 🩸 LORE
+## Parannusasemat
 
-GOON ETERNAL: VIIMEINEN EDGEYS
+Tasoilla 3, 6 ja 9 loytyyassa parannusasema. Lahesty sita ja paina `E`.
+Parannuksia ostetaan **tokeneilla**, joita loytyy kentista.
 
-VUOSI 2026: Maailma ei päättynyt ydinsotaan, vaan Suureen Goonaukseen. Muinainen Dracula on kaapannut maailman naisväestön mielen "Morsiusverkkoon" – digitaaliseen goon-luolaan, jossa kukaan ei ole oma itsensä. Miehet on poistettu palvelimelta, ja maailma on vajonnut transsinomaiseen hiljaisuuteen.
+| Parannus | Vaikutus |
+|----------|----------|
+| Damage x2 per tier | Tuplaa kaikkien aseiden perusvahingon |
+| Fire Rate | Nopeuttaa laukausvahteja |
+| Max Health | +5 maksimielama per taso |
+| Max Stamina | +20 kestAvyys per taso |
+| Stamina Recovery | Nopeampi kestAvyyden palautuminen |
+| Max Ammo +12% | Kasvattaa kaikkien aseiden maksimimaaraa 12% |
+| Armor | -5% saatu vahinko per taso |
+| Ricochet | Luoti voi kimmahtaa seuraavaan viholliseen |
+| Lifesteal | Mahdollisuus parantua tappojen yhteydessa |
 
-THE VAULT: Kymmenen kerrosta puhdasta betonia ja kärsimystä. Se on Draculan päämaja, jossa hän hallitsee teknomagiasta käsin. Bunkkerin käytävät ovat täynnä tyhjiä katseita ja "moggaavia" vartijoita, jotka odottavat vain yhtä virhettä.
-
-PERTTI: Viimeinen vapaa mies. Pertti ei ole mikään valittu sankari, hän on vain liian itsepäinen antautuakseen Draculan aivopesulle. Hän on bunkkerin ainoa häiriötekijä, The Last Gooner, joka ei suostu häviämään.
-
-PELIMEKANIIKAT: Yksi työkalu, kymmenen kerrosta: Pertillä ei ole sorkkarautoja tai hienoja vempaimia. Hänellä on vain vanha, ruosteinen pumppuhaulikko. Ammuksia on säälittävän vähän, joten jokainen laukaus on tehtävä laskelmoidusti. Kun piippu laulaa, koko kerros herää.
-
-The Grind: Raivaa tiesi alas asuinkerroksista, ohi hämärtyneiden kasvihuoneiden ja läpi öljyisten konehuoneiden. Jokainen kerros on askel lähemmäs Draculaa.
-
-Final Boss: Alimmalla tasolla odottaa itse Dracula. Hän yrittää murtaa Pertin mielen teknologisella loitsullaan, mutta Pertti vastaa siihen lyijyllä.
-
-TAVOITE: Laskeudu pohjalle, vältä joutumasta osaksi Draculan ikuista transsia ja paina liipaisinta.
----
-
-## 💾 Tallennus
-
-Peli tallentaa edistymisen automaattisesti tiedostoon `savegame.json`, joka luodaan pelin kansioon.
+Parannusten hinta nousee tason mukaan: tasot 1-2 maksavat 1 tokenin, tasot 3-4 maksavat 2 ja taso 5 maksaa 3 tokenia.
 
 ---
 
-## 🎵 Discord Rich Presence
+## Pisteiden kertoja
 
-Jos Discord on käynnissä, peli näyttää automaattisesti mitä kenttää pelaat. Jos Discordia ei löydy, peli käynnistyy normaalisti ilman virhettä.
+Tappaminen nopeasti perakkaain kasvattaa pistekertojaa:
+
+| Tappomaara | Viesti | Kerroin |
+|-----------|--------|---------|
+| 3+ | TRIPLE KILL! | x2 |
+| 5+ | KILLING SPREE! | x3 |
+| 8+ | RAMPAGE! | x4 |
+| 12+ | GODLIKE! | x5 |
+
+Kerroin nollautuu jos 3 sekuntia kuluu ilman tappoa. Aktiivinen kerroin nakyyy HUD:ssa ajastimella.
+
+---
+
+## LORE
+
+**GOON ETERNAL: VIIMEINEN EDGEYS**
+
+VUOSI 2026: Maailma ei paattynyt ydinsotaan, vaan Suureen Goonaukseen. Muinainen Dracula on kaapannut maailman naisvaeston mielen "Morsiusverkkoon" -- digitaaliseen goon-luolaan, jossa kukaan ei ole oma itsensa. Miehet on poistettu palvelimelta, ja maailma on vajonnut transsinomaiseen hiljaisuuteen.
+
+**THE VAULT:** Kymmenen kerrosta puhdasta betonia ja karsimysta. Se on Draculan paamaja, jossa han hallitsee teknomagiasta kasin. Bunkkerin kayravat ovat taynnA tyhjiA katseita ja "moggaavia" vartijoita, jotka odottavat vain yhta virhettA.
+
+**PERTTI:** Viimeinen vapaa mies. Pertti ei ole mikaan valittu sankari, han on vain liian itsepAinen antautuakseen Draculan aivopesulle. Han on bunkkerin ainoa hairiotekija, The Last Gooner, joka ei suostu hAviAmAan.
+
+**TAVOITE:** Laskeudu pohjalle, valta joutumasta osaksi Draculan ikuista transsia ja paina liipaisinta.
+
+---
+
+## Tallennus
+
+Peli tallentaa edistymisen automaattisesti tiedostoon `savegame.json`. Asetukset tallennetaan `settings.json`-tiedostoon ja tulostaulukko `highscores.json`-tiedostoon -- kaikki luodaan automaattisesti pelin kansioon.
+
+---
+
+## Tulostaulukko
+
+Pelin voittamisen jalkeen nakyy tulostaulukko, joka tallentaa **10 parasta suoritusta** seka pisteiden etta ajan mukaan. Naita voi selata `TAB`-nappaimella tai klikkaamalla valilehtiA voittoruudussa.
+
+---
+
+## Discord Rich Presence
+
+Jos Discord on kaynnissa, peli nayttaa automaattisesti mita kenttaa pelaat. Jos Discordia ei loydy, peli kaynnistyy normaalisti ilman virhetta.

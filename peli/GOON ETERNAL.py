@@ -4622,9 +4622,12 @@ class Game:
                     self._cut_cam_x = self._cut_cam_y = self._cut_cam_a = None
                     continue
                 if ev.key == pygame.K_ESCAPE:
-                    self._release_mouse()
-                    self._pause_timer()
-                    return 'pause'
+                    if self.game_won:
+                        pass  # ignore escape during win fade
+                    else:
+                        self._release_mouse()
+                        self._pause_timer()
+                        return 'pause'
                 if ev.key == pygame.K_l:
                     self.show_fps = not self.show_fps
                 if ev.key == pygame.K_r and self.health <= 0:
@@ -4675,7 +4678,7 @@ class Game:
                 return 'next_level'
 
         if self.game_won:
-            self.level_fade += 2
+            self.level_fade += 4
             if self.level_fade >= 255:
                 self._release_mouse()
                 return 'game_won'
@@ -4726,12 +4729,13 @@ class Game:
         if self.game_won:
             fade = pygame.Surface((WIDTH, HEIGHT))
             fade.fill((0, 0, 0))
-            fade.set_alpha(min(200, self.level_fade))
+            fade.set_alpha(min(255, self.level_fade))
             self.screen.blit(fade, (0, 0))
-            draw_glowing_text(self.screen, "DRACULA IS SLAIN!", self.big_font,
-                              COL_BOSS_BRIGHT, WIDTH//2, HEIGHT//2-20, centered=True)
-            draw_glowing_text(self.screen, "She crumbles to dust...", self.font,
-                              COL_GOLD, WIDTH//2, HEIGHT//2+30, centered=True)
+            if self.level_fade < 180:
+                draw_glowing_text(self.screen, "DRACULA IS SLAIN!", self.big_font,
+                                  COL_BOSS_BRIGHT, WIDTH//2, HEIGHT//2-20, centered=True)
+                draw_glowing_text(self.screen, "She crumbles to dust...", self.font,
+                                  COL_GOLD, WIDTH//2, HEIGHT//2+30, centered=True)
 
         if self.show_fps:
             fps_val = int(self.clock.get_fps())
@@ -5646,17 +5650,20 @@ def main():
                         pygame.quit()
                         sys.exit()
 
-                pygame.display.flip()
-                game.clock.tick(FPS)
-
                 if result == 'game_won':
                     final_time = game.get_speedrun_elapsed()
                     final_kills = game.total_kills + game.level_kills
+                    pygame.display.flip()
+                    game.clock.tick(FPS)
                     show_win_screen(screen, font, big_font, small_font,
                                     game.score, final_time, final_kills)
                     in_game = False
                     break
-                elif result == 'next_level':
+
+                pygame.display.flip()
+                game.clock.tick(FPS)
+
+                if result == 'next_level':
                     prev_score     = game.score
                     carried_health = game.health
                     carried_ammo   = {

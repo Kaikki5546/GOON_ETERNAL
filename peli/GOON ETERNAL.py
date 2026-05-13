@@ -65,7 +65,6 @@ CELL_EXITDOOR = 3
 ENEMY_RESPAWN_TICKS = 600
 BOSS_LEVEL = 10
 MINI_BOSS_LEVEL = 5
-DEMO_LEVEL = 99   # Sentinel for the custom hand-crafted demo arena
 
 # Weapons
 WEAPON_PISTOL  = 'pistol'
@@ -135,8 +134,6 @@ def generate_map(rng, level=1, run_seed=0):
         return generate_boss_arena(rng)
     if level == MINI_BOSS_LEVEL:
         return generate_miniboss_arena(rng)
-    if level == DEMO_LEVEL:
-        return generate_demo_arena()
 
     # Use a combined seed so the map is unique per (run, level) pair
     map_rng = random.Random(run_seed * 10000 + level * 997 + 13)
@@ -372,91 +369,6 @@ def generate_map(rng, level=1, run_seed=0):
 
     return (grid, player_start, exit_pos, key_pos, door_list, W, H, art_positions,
             keycard_color, keys_needed, key_pos2, key_pos3, loot_rooms, secret_walls)
-
-
-def generate_demo_arena():
-    """Hand-crafted demo map: wide open rooms with clear sightlines.
-
-    Layout (each cell = 1 tile, W=H=40):
-
-      All outer border = WALL
-      Central hub room: cols 16-23, rows 16-23  (8x8 open)
-      North room:       cols 16-23, rows  3-13  (8x10 open)
-      South room:       cols 16-23, rows 26-36  (8x10 open)
-      East room:        cols 26-36, rows 16-23  (10x8 open)
-      West room:        cols  3-13, rows 16-23  (10x8 open)
-      Corridors connecting each room to hub are 4 tiles wide -- no narrow squeezes.
-
-    Player spawns in the hub centre facing east.
-    Key is placed in the north room (open floor, nowhere to hide).
-    Exit door is on the south wall of the south room.
-    Enemies are pre-placed at fixed world coords returned alongside the map.
-    """
-    W, H = 40, 40
-    grid = [[CELL_WALL] * W for _ in range(H)]
-
-    def carve(x1, y1, x2, y2):
-        for ry in range(y1, y2 + 1):
-            for rx in range(x1, x2 + 1):
-                if 0 <= rx < W and 0 <= ry < H:
-                    grid[ry][rx] = CELL_FLOOR
-
-    # Central hub
-    carve(16, 16, 23, 23)
-
-    # North room
-    carve(16,  3, 23, 13)
-    # North corridor (already open -- rooms share column range)
-    carve(17, 13, 22, 16)   # wide 6-tile connector
-
-    # South room
-    carve(16, 26, 23, 36)
-    # South corridor
-    carve(17, 23, 22, 26)
-
-    # East room
-    carve(26, 16, 36, 23)
-    # East corridor
-    carve(23, 17, 26, 22)
-
-    # West room
-    carve( 3, 16, 13, 23)
-    # West corridor
-    carve(13, 17, 16, 22)
-
-    # A few decorative pillars inside rooms for cover variety (not blocking sightlines)
-    pillar_spots = [
-        (5, 18), (5, 21), (11, 18), (11, 21),   # west room corners
-        (28, 18), (28, 21), (34, 18), (34, 21),  # east room corners
-        (18,  5), (21,  5), (18, 11), (21, 11),  # north room corners
-        (18, 28), (21, 28), (18, 34), (21, 34),  # south room corners
-    ]
-    for px, py in pillar_spots:
-        if 0 < px < W - 1 and 0 < py < H - 1 and grid[py][px] == CELL_FLOOR:
-            grid[py][px] = CELL_WALL
-
-    # Exit door on south wall of south room (row 36 is last floor row _ put door at 37)
-    exit_tx, exit_ty = 19, 36
-    grid[exit_ty][exit_tx] = CELL_EXITDOOR
-    exit_pos = (exit_ty, exit_tx)
-
-    # Player spawns in hub centre, facing east
-    player_start = (
-        19 * TILE_SIZE + TILE_SIZE // 2,
-        19 * TILE_SIZE + TILE_SIZE // 2,
-    )
-
-    # Key is in north room, centre
-    key_pos = (
-        19 * TILE_SIZE + TILE_SIZE // 2,
-         8 * TILE_SIZE + TILE_SIZE // 2,
-    )
-
-    door_list = []
-    art_positions = []
-
-    return (grid, player_start, exit_pos, key_pos, door_list, W, H, art_positions,
-            'red', 1, None, None, [], [])
 
 
 def generate_miniboss_arena(rng):
@@ -1116,7 +1028,7 @@ class Game:
                  sound_volume=0.55, sfx_volume=0.75, sfx_mode='normal',
                  mouse_sensitivity=MOUSE_SENSITIVITY,
                  carried_upgrades=None, carried_tokens=0,
-                 run_seed=0, demo_mode=False,
+                 run_seed=0,
                  screen_shake_enabled=True,
                  ray_divisor=1, draw_distance=40,
                  glow_effects=True, floor_detail=True):
@@ -1154,13 +1066,6 @@ class Game:
 
         self.total_kills = total_kills
         self.level_kills = 0
-        self.demo_mode   = demo_mode
-
-        # Demo AI state
-        self._demo_target_angle  = 0.0
-        self._demo_strafe_dir    = 1
-        self._demo_strafe_timer  = 0
-        self._demo_open_door_cd  = 0
 
         def load_img(name, fb_col, fb_sz):
             full_path = os.path.join(MEDIA_PATH, name)
@@ -1342,8 +1247,9 @@ class Game:
         self._reachable_tiles = _flood_fill_reachable(
             self.grid, self.MAP_W, self.MAP_H, start_tx, start_ty)
 
-        # Track loot room centers (no secret walls)
-        self._secret_opened = set()  # kept for save-compat, always empty
+        # Track which item world-positions have been picked up this level
+        # (persisted in save so items don't respawn on load)
+        self._items_picked = set()   # set of (round(wx), round(wy)) tuples
 
         self.wall_art = {}
         if art_positions and self.art_imgs:
@@ -1453,6 +1359,9 @@ class Game:
             self._streak_kills = load_data.get('streak_kills', 0)
             self._streak_timer = load_data.get('streak_timer', 0)
             self._streak_tier  = load_data.get('streak_tier',  0)
+            # Restore picked-item positions so _spawn_items can filter them out
+            raw_picked = load_data.get('items_picked', [])
+            self._items_picked = {tuple(pos) for pos in raw_picked}
 
         self.shooting_timer = 0
         self.walk_cycle     = 0.0
@@ -1525,12 +1434,7 @@ class Game:
         self._spawn_initial_enemies()
         self.respawn_queue = []
         self.items = []
-        if self.level == DEMO_LEVEL:
-            # Key placed by generate_demo_arena; enemies & supplies via _spawn_demo_enemies
-            key_spr = self.key_imgs.get(self.keycard_color, self.key_imgs['red'])
-            self.items.append(SpriteObject(key_pos[0], key_pos[1], key_spr, ITEM_KEY))
-            self._spawn_demo_enemies()
-        elif not self.is_boss_level and not self.is_miniboss_level:
+        if not self.is_boss_level and not self.is_miniboss_level:
             self._spawn_items()
         elif self.is_miniboss_level:
             self._spawn_miniboss_items()
@@ -1676,60 +1580,9 @@ class Game:
         speed = (0.9 + self.level * 0.05) * self._post5_mult()
         return Enemy(x, y, self.v2_img, speed, int(self._vihu2_health(self.level)), 6, True)
 
-    def _spawn_demo_enemies(self):
-        """Spawn enemies at fixed, hand-picked positions in the demo arena.
-        All positions are in the centres of the open rooms -- guaranteed clear
-        sightlines from the hub and corridors.
-        """
-        def world(tx, ty):
-            return tx * TILE_SIZE + TILE_SIZE // 2, ty * TILE_SIZE + TILE_SIZE // 2
-
-        # West room -- two ground enemies
-        wx1, wy1 = world(7, 19)
-        wx2, wy2 = world(10, 20)
-        self.enemies.append(self._make_vihu(wx1, wy1))
-        self.enemies.append(self._make_vihu(wx2, wy2))
-
-        # East room -- one flier + one ground
-        ex1, ey1 = world(30, 19)
-        ex2, ey2 = world(33, 20)
-        self.enemies.append(self._make_vihu2(ex1, ey1))
-        self.enemies.append(self._make_vihu(ex2, ey2))
-
-        # North room -- two enemies guarding the key
-        nx1, ny1 = world(19,  6)
-        nx2, ny2 = world(21,  9)
-        self.enemies.append(self._make_vihu(nx1, ny1))
-        self.enemies.append(self._make_vihu2(nx2, ny2))
-
-        # South room -- two enemies between hub and exit
-        sx1, sy1 = world(19, 29)
-        sx2, sy2 = world(21, 32)
-        self.enemies.append(self._make_vihu(sx1, sy1))
-        self.enemies.append(self._make_vihu(sx2, sy2))
-
-        # Drop some ammo boxes in each room so the AI never runs dry
-        ammo_spots = [
-            world(8, 19), world(32, 19),
-            world(19,  7), world(19, 30),
-            world(19, 19),  # hub centre bonus box
-        ]
-        for ax, ay in ammo_spots:
-            self.items.append(SpriteObject(ax, ay, self.box_img, ITEM_AMMO))
-
-        # Health packs in each room
-        hp_spots = [world(6, 21), world(33, 18), world(21, 10), world(21, 33)]
-        for hx, hy in hp_spots:
-            self.items.append(SpriteObject(hx, hy, self.hp_img, ITEM_HEALTH))
-
     def _spawn_initial_enemies(self):
         SAFE_DIST = TILE_SIZE * 8
         self.miniboss = None
-
-        if self.level == DEMO_LEVEL:
-            # Demo arena uses hand-placed enemies via _spawn_demo_enemies
-            # (called after items are set up, at the end of __init__)
-            return
 
         if self.is_miniboss_level:
             # Killdozer spawns at arena centre (cleared of obstacles in generate_miniboss_arena)
@@ -1793,7 +1646,8 @@ class Game:
                 self.enemies.append(Rotta(p[0], p[1], self.rotta_img, self.level))
 
     def _spawn_items(self):
-        """Spawn all items, seeded per run+level, only on reachable floor tiles."""
+        """Spawn all items, seeded per run+level, only on reachable floor tiles.
+        Items whose positions were already picked up (loaded from save) are skipped."""
         seed = self.run_seed * 1000 + self.level
         item_rng = random.Random(seed)
 
@@ -1893,6 +1747,13 @@ class Game:
             self.items.append(SpriteObject(wx2 + TILE_SIZE, wy2, self.box_img, ITEM_AMMO))
             # Always drop a token in loot rooms (guaranteed reward for exploration)
             self.items.append(SpriteObject(wx2, wy2 + TILE_SIZE, self.token_img, ITEM_TOKEN))
+
+        # Remove any items whose positions were already picked up in this save
+        if self._items_picked:
+            self.items = [
+                it for it in self.items
+                if (round(it.x), round(it.y)) not in self._items_picked
+            ]
 
     # ------------------------------------------------------------------
     # Collision
@@ -2786,6 +2647,8 @@ class Game:
                     continue
                 else:
                     continue
+                # Record this position so save/load doesn't respawn it
+                self._items_picked.add((round(item.x), round(item.y)))
                 self.items.remove(item)
 
     # ------------------------------------------------------------------
@@ -4062,228 +3925,6 @@ class Game:
         border_col = COL_BOSS_BRIGHT if self.is_boss_level else ((255, 140, 0) if self.is_miniboss_level else (100, 20, 160))
         pygame.draw.rect(self.screen, border_col, (ox, oy, mw, mh), 1)
 
-    # ------------------------------------------------------------------
-    # Demo AI -- auto-plays the game for presentation mode
-    # ------------------------------------------------------------------
-    def _demo_has_los(self, tx, ty):
-        """Cast a DDA ray from player toward (tx, ty). Returns True if nothing
-        solid blocks the path before we reach the target."""
-        dx = tx - self.px
-        dy = ty - self.py
-        dist = math.hypot(dx, dy)
-        if dist < 1:
-            return True
-        angle_to = math.atan2(dy, dx)
-        hit_dist, cell, _, _ = dda_cast(
-            self.px, self.py, angle_to,
-            self.grid, self.MAP_W, self.MAP_H, self.door_states
-        )
-        return hit_dist >= dist - TILE_SIZE * 0.5
-
-    def _has_los(self, ax, ay, bx, by):
-        """Returns True if there is an unobstructed line of sight from (ax,ay)
-        to (bx,by) -- i.e. the first wall hit is beyond the target."""
-        dx = bx - ax
-        dy = by - ay
-        dist = math.hypot(dx, dy)
-        if dist < 1:
-            return True
-        angle_to = math.atan2(dy, dx)
-        hit_dist, _, _, _ = dda_cast(
-            ax, ay, angle_to,
-            self.grid, self.MAP_W, self.MAP_H, self.door_states
-        )
-        return hit_dist >= dist - TILE_SIZE * 0.5
-
-    def handle_demo_ai(self):
-        """Scripted trailer-style demo that showcases gameplay in predetermined scenes."""
-        # Always invincible
-        self.health     = self.max_health
-        self.pain_flash = 0
-        self.stamina    = self.max_stamina
-        self.is_moving  = False
-
-        # Init script state
-        if not hasattr(self, '_demo_tick'):
-            self._demo_tick        = 0
-            self._demo_scene       = -1
-            self._demo_waypoint    = None
-            self._demo_shoot_cd    = 0
-            self._demo_look_target = None
-            self._demo_open_door_cd = 0
-
-        self._demo_tick += 1
-        T = self._demo_tick
-
-        def world(tx, ty):
-            return tx * TILE_SIZE + TILE_SIZE // 2, ty * TILE_SIZE + TILE_SIZE // 2
-
-        # -- Scripted enemy layout per scene ---------------------------
-        # Format: {scene_id: [(tx, ty, type), ...]}
-        # type: 'v1'=ground, 'v2'=flying
-        ENEMY_LAYOUTS = {
-            1: [(7, 19, 'v1'), (10, 20, 'v1')],           # west room: 2 ground
-            2: [(7, 19, 'v1'), (10, 20, 'v1')],           # same, now shoot them
-            3: [(7, 19, 'v1')],                            # one surviving
-            4: [(19, 6, 'v2'), (21, 9, 'v1')],            # north room
-            5: [(19, 6, 'v2'), (21, 9, 'v1')],            # north, fight
-            6: [(30, 19, 'v2'), (33, 20, 'v1')],          # east room
-            7: [(30, 19, 'v2'), (33, 20, 'v1')],          # east, fight
-            8: [(19, 29, 'v1'), (21, 32, 'v1')],          # south room
-            9: [(19, 29, 'v1')],                           # south, moving to exit
-            10: [(7, 19, 'v1'), (30, 19, 'v2')],          # dramatic lookback, enemies visible
-            11: [(7, 19, 'v1'), (30, 19, 'v2'),
-                 (19, 6, 'v1')],                           # hub strafe, multiple targets
-        }
-
-        LOOP = 1800
-        t = T % LOOP
-
-        # Determine scene from tick
-        if   t < 80:   scene = 0
-        elif t < 200:  scene = 1
-        elif t < 380:  scene = 2
-        elif t < 480:  scene = 3
-        elif t < 600:  scene = 4
-        elif t < 750:  scene = 5
-        elif t < 900:  scene = 6
-        elif t < 1050: scene = 7
-        elif t < 1200: scene = 8
-        elif t < 1380: scene = 9
-        elif t < 1500: scene = 10
-        elif t < 1650: scene = 11
-        else:          scene = 0
-
-        # When scene changes, rebuild enemy list from script
-        if scene != self._demo_scene:
-            self._demo_scene = scene
-            self.enemies = []
-            layout = ENEMY_LAYOUTS.get(scene, [])
-            for tx, ty, etype in layout:
-                wx, wy = world(tx, ty)
-                if etype == 'v2':
-                    e = self._make_vihu2(wx, wy)
-                else:
-                    e = self._make_vihu(wx, wy)
-                # Fix position -- disable AI path
-                e.state = 'roam'
-                e.path  = []
-                self.enemies.append(e)
-
-        # Keep scripted enemies at their fixed positions (frozen in place)
-        layout = ENEMY_LAYOUTS.get(scene, [])
-        for i, e in enumerate(self.enemies):
-            if not e.alive or i >= len(layout):
-                continue
-            tx, ty, _ = layout[i]
-            wx, wy = world(tx, ty)
-            e.x     = wx
-            e.y     = wy
-            e.state = 'roam'
-            e.path  = []
-
-        # -- Scene camera/movement script -------------------------------
-        if t < 80:
-            self._demo_look_target = None
-            self.angle += 0.018
-            self._demo_waypoint = None
-        elif t < 200:
-            self._demo_waypoint    = world(14, 19)
-            self._demo_look_target = world(7, 19)
-        elif t < 380:
-            self._demo_waypoint    = None
-            self._demo_look_target = world(7, 19)
-        elif t < 480:
-            self._demo_waypoint    = world(16, 17)
-            self._demo_look_target = world(7, 19)
-        elif t < 600:
-            self._demo_waypoint    = world(19, 8)
-            self._demo_look_target = world(19, 6)
-        elif t < 750:
-            self._demo_waypoint    = None
-            self._demo_look_target = world(19, 6)
-        elif t < 900:
-            self._demo_waypoint    = world(28, 19)
-            self._demo_look_target = world(30, 19)
-        elif t < 1050:
-            self._demo_waypoint    = None
-            self._demo_look_target = world(30, 19)
-        elif t < 1200:
-            self._demo_waypoint    = world(19, 27)
-            self._demo_look_target = world(19, 29)
-        elif t < 1380:
-            self._demo_waypoint    = world(19, 33)
-            self._demo_look_target = world(19, 36)
-        elif t < 1500:
-            self._demo_waypoint    = None
-            self._demo_look_target = world(7, 19)
-        elif t < 1650:
-            self._demo_waypoint    = world(22, 22)
-            self._demo_look_target = world(7, 19)
-        else:
-            self._demo_waypoint    = world(19, 19)
-            self._demo_look_target = None
-            self.angle += 0.022
-
-        # -- Camera rotation -------------------------------------------
-        if self._demo_look_target is not None:
-            lx, ly = self._demo_look_target
-            aim_angle = math.atan2(ly - self.py, lx - self.px)
-            diff = aim_angle - self.angle
-            while diff >  math.pi: diff -= 2 * math.pi
-            while diff < -math.pi: diff += 2 * math.pi
-            TURN_RATE = 0.045
-            DEADZONE  = 0.012
-            if abs(diff) < DEADZONE:
-                self._cam_vel *= 0.5
-            else:
-                raw_delta = max(-TURN_RATE, min(TURN_RATE, diff))
-                self._cam_vel = self._cam_vel * 0.35 + raw_delta * 0.65
-            self.angle += self._cam_vel
-        else:
-            self._cam_vel *= 0.85
-
-        # -- Movement --------------------------------------------------
-        SPEED = 4.0
-        if self._demo_waypoint is not None:
-            wx, wy = self._demo_waypoint
-            dist_wp = math.hypot(wx - self.px, wy - self.py)
-            if dist_wp > TILE_SIZE * 0.8:
-                move_a = math.atan2(wy - self.py, wx - self.px)
-                probe_x = self.px + math.cos(move_a) * TILE_SIZE * 0.9
-                probe_y = self.py + math.sin(move_a) * TILE_SIZE * 0.9
-                if not self._blocked(int(probe_x/TILE_SIZE), int(probe_y/TILE_SIZE)):
-                    self._move(math.cos(move_a) * SPEED, math.sin(move_a) * SPEED)
-                    self.is_moving = True
-
-        # -- Shooting at scripted enemies -------------------------------
-        if self._demo_shoot_cd > 0:
-            self._demo_shoot_cd -= 1
-
-        # Only shoot during "fight" scenes
-        if scene in (2, 5, 7, 9, 11) and self._demo_shoot_cd == 0 and self.ammo_pistol > 0:
-            for e in self.enemies:
-                if not e.alive: continue
-                d = math.hypot(e.x - self.px, e.y - self.py)
-                if d > TILE_SIZE * 14: continue
-                aim_ra = math.atan2(e.y - self.py, e.x - self.px) - self.angle
-                while aim_ra >  math.pi: aim_ra -= 2 * math.pi
-                while aim_ra < -math.pi: aim_ra += 2 * math.pi
-                if abs(aim_ra) < 0.25:
-                    self.shooting_timer = self.base_shooting_timer
-                    self.muzzle_flash   = 7
-                    self.ammo_pistol    = max(self.ammo_pistol - 1, 0)
-                    if self.sfx_shot: self.sfx_shot.play()
-                    self._demo_shoot_cd = self.base_shooting_timer + 10
-                    e.health -= (1 + self.upgrades.get('damage', 0)) * 3
-                    if e.health <= 0:
-                        e.alive = False
-                        self._play_death_sfx()
-                        self.explosions.append({'x': e.x, 'y': e.y, 'timer': self.BOOM_DURATION})
-                    break
-
-        if self.ammo_pistol < 10:
-            self.ammo_pistol = min(30, self.max_ammo_pistol)
 
     def handle_input(self):
         keys = pygame.key.get_pressed()
@@ -4623,10 +4264,6 @@ class Game:
             if ev.type == pygame.MOUSEWHEEL:
                 self._pending_scroll = -ev.y  # scroll down = next weapon
             if ev.type == pygame.KEYDOWN:
-                if self.demo_mode:
-                    # Any key press during demo exits back to menu
-                    self._release_mouse()
-                    return 'demo_exit'
                 # Skip boss cutscene on any key (except escape)
                 if self.boss_intro_timer > 60 and ev.key != pygame.K_ESCAPE:
                     self.boss_intro_timer = 60
@@ -4654,9 +4291,6 @@ class Game:
                                 break
                     if not used_station:
                         self._try_open_door()
-            if ev.type == pygame.MOUSEBUTTONDOWN and self.demo_mode:
-                self._release_mouse()
-                return 'demo_exit'
 
         # Streak timer + display decay
         self._tick_streak()
@@ -4666,21 +4300,16 @@ class Game:
 
         if self.health > 0 and not self.level_complete and not self.game_won:
             if self.boss_intro_timer <= 60:
-                if self.demo_mode:
-                    self.handle_demo_ai()
-                    self.check_pickups()
-                    self.update_doors()
-                else:
-                    self.handle_input()
-                    self.move_enemies()
-                    self.update_respawns()
-                    self.update_pressure_spawner()
-                    self.check_pickups()
-                    self.update_doors()
-                    if self.is_boss_level:
-                        self.update_boss()
-                    if self.is_miniboss_level:
-                        self.update_miniboss()
+                self.handle_input()
+                self.move_enemies()
+                self.update_respawns()
+                self.update_pressure_spawner()
+                self.check_pickups()
+                self.update_doors()
+                if self.is_boss_level:
+                    self.update_boss()
+                if self.is_miniboss_level:
+                    self.update_miniboss()
 
         if self.level_complete:
             self.level_fade += 4
@@ -4756,24 +4385,6 @@ class Game:
             fps_col = (80, 255, 80) if fps_val >= 55 else (255, 200, 50) if fps_val >= 30 else (255, 60, 60)
             fps_txt = self.small_font.render(f"FPS: {fps_val}", True, fps_col)
             self.screen.blit(fps_txt, (8, 8))
-
-        if self.demo_mode:
-            # Pulsing "DEMO MODE" banner
-            pulse_a = int(abs(math.sin(self.tick_count * 0.04)) * 80 + 140)
-            banner = pygame.Surface((WIDTH, 36), pygame.SRCALPHA)
-            banner.fill((0, 0, 0, 180))
-            self.screen.blit(banner, (0, HEIGHT - 36))
-            demo_col = (255, 20, 147)
-            draw_glowing_text(self.screen, "DEMO MODE  -  Press any key to return to menu",
-                              self.small_font, demo_col, WIDTH // 2, HEIGHT - 28,
-                              glow_color=(100, 0, 50), centered=True)
-            # Top badge
-            top_badge = pygame.Surface((160, 28), pygame.SRCALPHA)
-            top_badge.fill((0, 0, 0, 160))
-            self.screen.blit(top_badge, (WIDTH // 2 - 80, 0))
-            draw_glowing_text(self.screen, "[ DEMO ]", self.small_font,
-                              (255, 215, 0), WIDTH // 2, 4,
-                              glow_color=(120, 80, 0), centered=True)
 
         return None
 
@@ -5041,10 +4652,9 @@ def show_main_menu(screen, font, small_font, tiny_font=None, settings=None):
     start_y = HEIGHT//2 - 10
     btns = [
         {"text": "NEW GAME",  "action": "new",      "rect": pygame.Rect(WIDTH//2 - btn_width//2, start_y,       btn_width, btn_height)},
-        {"text": "LOAD GAME", "action": "load",     "rect": pygame.Rect(WIDTH//2 - btn_width//2, start_y + 66,  btn_width, btn_height)},
-        {"text": "[ DEMO ]",  "action": "demo",     "rect": pygame.Rect(WIDTH//2 - btn_width//2, start_y + 132, btn_width, btn_height)},
-        {"text": "SETTINGS",  "action": "settings", "rect": pygame.Rect(WIDTH//2 - btn_width//2, start_y + 198, btn_width, btn_height)},
-        {"text": "EXIT",      "action": "exit",     "rect": pygame.Rect(WIDTH//2 - btn_width//2, start_y + 264, btn_width, btn_height)},
+        {"text": "LOAD GAME", "action": "load",     "rect": pygame.Rect(WIDTH//2 - btn_width//2, start_y + 76,  btn_width, btn_height)},
+        {"text": "SETTINGS",  "action": "settings", "rect": pygame.Rect(WIDTH//2 - btn_width//2, start_y + 152, btn_width, btn_height)},
+        {"text": "EXIT",      "action": "exit",     "rect": pygame.Rect(WIDTH//2 - btn_width//2, start_y + 228, btn_width, btn_height)},
     ]
 
     clock = pygame.time.Clock()
@@ -5086,22 +4696,13 @@ def show_main_menu(screen, font, small_font, tiny_font=None, settings=None):
 
         for b in btns:
             hovered = b["rect"].collidepoint((mx, my))
-            is_demo = b["action"] == "demo"
             if hovered:
-                if is_demo:
-                    draw_gradient_rect(screen, (180, 140, 0), (120, 90, 0), tuple(b["rect"]))
-                else:
-                    draw_gradient_rect(screen, (180, 20, 100), (140, 10, 80), tuple(b["rect"]))
+                draw_gradient_rect(screen, (180, 20, 100), (140, 10, 80), tuple(b["rect"]))
             else:
-                if is_demo:
-                    draw_gradient_rect(screen, (80, 60, 0), (50, 35, 0), tuple(b["rect"]))
-                else:
-                    draw_gradient_rect(screen, (100, 10, 60), (60, 5, 40), tuple(b["rect"]))
-            border_col = (255, 220, 80) if is_demo else ((255,150,200) if hovered else (255, 105, 180))
+                draw_gradient_rect(screen, (100, 10, 60), (60, 5, 40), tuple(b["rect"]))
+            border_col = (255,150,200) if hovered else (255, 105, 180)
             pygame.draw.rect(screen, border_col, b["rect"], 2, border_radius=8)
-
-            txt_col = (255, 220, 80) if is_demo else COL_WHITE
-            txt = font.render(b["text"], True, txt_col)
+            txt = font.render(b["text"], True, COL_WHITE)
             screen.blit(txt, txt.get_rect(center=b["rect"].center))
 
             if click and hovered:
@@ -5534,6 +5135,8 @@ def show_pause_menu(screen, font, small_font, tiny_font, game):
                         'streak_kills': game._streak_kills,
                         'streak_timer': game._streak_timer,
                         'streak_tier':  game._streak_tier,
+                        # items already picked up this level (prevents duplication on load)
+                        'items_picked': [list(pos) for pos in game._items_picked],
                     }
                     try:
                         with open(SAVE_FILE, "w") as f:
@@ -5569,7 +5172,6 @@ def show_loading_screen(screen, font, small_font, level):
 
     is_boss     = (level == BOSS_LEVEL)
     is_miniboss = (level == MINI_BOSS_LEVEL)
-    is_demo     = (level == DEMO_LEVEL)
     screen.fill(COL_DARK if not is_boss else (5, 0, 10))
     load_img_surf = None
     lw2 = lh2 = 0
@@ -5588,9 +5190,6 @@ def show_loading_screen(screen, font, small_font, level):
     elif is_miniboss:
         lv_txt  = font.render("THE KILLDOZER AWAITS...", True, (255, 140, 0))
         tip_txt = small_font.render("Kill KILLDOZER to drop the key - then find the exit (north wall)!", True, (255,200,100))
-    elif is_demo:
-        lv_txt  = font.render("DEMO - Combat Showcase Arena", True, (255, 215, 0))
-        tip_txt = small_font.render("Watch the action unfold! Press any key to return to menu.", True, (200, 200, 100))
     else:
         lv_txt  = font.render(f"Loading Level {level}...", True, (255,182,193))
         tip_txt = small_font.render(random.choice([
@@ -5694,60 +5293,6 @@ def main():
                 run_seed = load_data.get('run_seed', run_seed)  # preserve seed from save
             except Exception as e:
                 print(f"Failed to load save: {e}")
-
-        # ---- Demo mode ----
-        if menu_action == 'demo':
-            demo_running = True
-            while demo_running:
-                pygame.mixer.music.stop()
-                show_loading_screen(screen, font, small_font, DEMO_LEVEL)
-                demo_game = Game(
-                    screen, level=DEMO_LEVEL, prev_score=0,
-                    carried_health=50,
-                    carried_ammo={'pistol': 99, 'shotgun': 40, 'smg': 200},
-                    speedrun_start=time.time(), total_kills=0,
-                    sound_volume=settings['sound_volume'],
-                    sfx_volume=settings['sfx_volume'],
-                    sfx_mode=settings['sfx_mode'],
-                    mouse_sensitivity=settings['mouse_sensitivity'],
-                    carried_upgrades={
-                        'damage': 2, 'firerate': 2, 'health': 0,
-                        'stamina': 0, 'stamina_recovery': 0, 'ammo_cap': 0,
-                        'armor': 0, 'ricochet': 0, 'lifesteal': 0,
-                    },
-                    carried_tokens=0,
-                    run_seed=random.randint(0, 2**31),
-                    demo_mode=True,
-                    screen_shake_enabled=settings['screen_shake_enabled'],
-                )
-                pygame.mouse.set_visible(True)
-                pygame.event.set_grab(False)
-
-                demo_clock = pygame.time.Clock()
-                while demo_running:
-                    events = pygame.event.get()
-                    for ev in events:
-                        if ev.type == pygame.QUIT:
-                            pygame.quit()
-                            sys.exit()
-                        # Any key/click ends the demo and returns to menu
-                        if ev.type in (pygame.KEYDOWN, pygame.MOUSEBUTTONDOWN):
-                            demo_running = False
-                            break
-
-                    if not demo_running:
-                        break
-
-                    result = demo_game.tick(events)
-                    pygame.display.flip()
-                    demo_clock.tick(FPS)
-
-                    if result == 'demo_exit':
-                        demo_running = False
-                        break
-
-            continue  # Return to main menu loop
-        # ---- End demo mode ----
 
         carried_upgrades = None
         carried_tokens   = 0

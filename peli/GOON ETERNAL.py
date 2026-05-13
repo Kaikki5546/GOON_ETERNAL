@@ -838,10 +838,22 @@ def make_dracula_img(size):
     return s
 
 def extract_cols(tex, size):
+    """Legacy column-surface extractor kept for non-numpy fallback path."""
     cols=[]
     for col in range(size):
         c=pygame.Surface((1,size)); c.blit(tex,(0,0),(col,0,1,size)); cols.append(c)
     return cols
+
+def extract_tex_array(tex, size):
+    """Return a (size, size, 3) uint8 numpy array for fast wall rendering.
+    Returns None if numpy is unavailable."""
+    try:
+        import numpy as np
+        arr = pygame.surfarray.array3d(tex)   # shape (W, H, 3), W==H==size
+        # Ensure exactly size x size (texture may be larger)
+        return arr[:size, :size, :].astype(np.uint8)
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -1231,8 +1243,23 @@ class Game:
             self._wood_arr = pygame.surfarray.array3d(self.wood_tex)
             self._ceil_arr = pygame.surfarray.array3d(self.ceil_tex)
             self._use_numpy = True
+
+            # --- Fast wall renderer: numpy texture arrays + shared framebuffer ---
+            self._wall_arr = extract_tex_array(self.wall_tex, TEX)
+            self._door_arr = extract_tex_array(self.door_tex, TEX)
+            self._exit_arr = extract_tex_array(self.exit_tex, TEX)
+            self._art_arrs = [extract_tex_array(img, TEX) for img in self.art_imgs]
+
+            # Reusable (WIDTH, HEIGHT, 3) framebuffer -- allocated once, reused every frame
+            self._wall_fb  = np.zeros((WIDTH, HEIGHT, 3), dtype=np.uint8)
+            # Scratch array for per-column scaling (TEX_SIZE,3) -> reused
+            self._col_scratch = np.zeros((TEX, 3), dtype=np.uint32)
+
         except ImportError:
             self._use_numpy = False
+            self._wall_arr = self._door_arr = self._exit_arr = None
+            self._art_arrs = [None] * len(self.art_imgs)
+            self._wall_fb  = None
 
         self.rng = random.Random(level * 9999 + 42)
         (self.grid, player_start, self.exit_pos,
@@ -2702,15 +2729,13 @@ class Game:
             pygame.draw.rect(self.screen, (100,60,25), (0, hh, WIDTH, hh))
 
     # ------------------------------------------------------------------
-    # Cast rays (DDA)
+    # Cast rays (DDA) -- numpy fast path + pygame fallback
     # ------------------------------------------------------------------
     def cast_rays(self):
         num_rays = max(1, NUM_RAYS // self.ray_divisor)
         sw = max(1, WIDTH // num_rays)
-        self.z_buffer = []
-        tick = pygame.time.get_ticks()
 
-        fog_end = self.draw_distance * TILE_SIZE
+        fog_end   = self.draw_distance * TILE_SIZE
         FOG_START = TILE_SIZE * 3
         FOG_END   = fog_end
         if self.is_boss_level:
@@ -2720,10 +2745,131 @@ class Game:
         else:
             fog_rgb = (8, 0, 18)
 
+        # Rebuild z_buffer as a list (consumed by draw_sprites)
+        self.z_buffer = []
+
+        tick = pygame.time.get_ticks()
+
+        if self._use_numpy and self._wall_arr is not None:
+            self._cast_rays_numpy(
+                num_rays, sw, FOG_START, FOG_END, fog_rgb, tick)
+        else:
+            self._cast_rays_pygame(
+                num_rays, sw, FOG_START, FOG_END, fog_rgb, tick)
+
+        while len(self.z_buffer) < WIDTH:
+            self.z_buffer.append(float('inf'))
+
+    # ------------------------------------------------------------------
+    def _cast_rays_numpy(self, num_rays, sw, FOG_START, FOG_END, fog_rgb, tick):
+        """Render all wall columns into a single numpy framebuffer, then blit once."""
+        np   = self._np
+        fb   = self._wall_fb          # (WIDTH, HEIGHT, 3) uint8, zeroed each frame
+        fb[:] = 0
+        TEX  = self.TEX_SIZE
+        HH   = HEIGHT // 2
+        fr, fg2, fb2 = fog_rgb
+
+        pulse_exit = int(abs(math.sin(tick * 0.003)) * 60)
+
         for ray in range(num_rays):
-            ra = (self.angle - HALF_FOV) + ray * (FOV / num_rays)
+            ra  = (self.angle - HALF_FOV) + ray * (FOV / num_rays)
+            dist, cell, wx_hit, side = dda_cast(
+                self.px, self.py, ra,
+                self.grid, self.MAP_W, self.MAP_H,
+                self.door_states, max_depth=self.draw_distance)
+
+            x_start = ray * sw
+            x_end   = min(WIDTH, x_start + sw)
+
+            # Z-buffer
+            for i in range(x_end - x_start):
+                self.z_buffer.append(dist)
+
+            wall_h = int((TILE_SIZE * HEIGHT * 1.9) / (dist + 0.1))
+            y0     = max(0,      HH - wall_h // 2)
+            y1     = min(HEIGHT, HH + wall_h // 2)
+            if y1 <= y0:
+                continue
+
+            ss    = 0.58 if side == 0 else 1.0
+            atten = max(0.04, ss / (1.0 + dist * 0.0012))
+            fog_t = max(0.0, min(1.0, (dist - FOG_START) / max(1, FOG_END - FOG_START)))
+            sv    = max(10, min(255, int(atten * 255 * (1.0 - fog_t * 0.88))))
+
+            # Pick texture array
+            cos_a = math.cos(ra); sin_a = math.sin(ra)
+            if abs(cos_a) < 1e-9: cos_a = 1e-9
+            if abs(sin_a) < 1e-9: sin_a = 1e-9
+            hit_mx = max(0, min(self.MAP_W-1, int((self.px + cos_a*dist)/TILE_SIZE)))
+            hit_my = max(0, min(self.MAP_H-1, int((self.py + sin_a*dist)/TILE_SIZE)))
+
+            if cell == CELL_DOOR:
+                door_st = self.door_states.get((hit_my, hit_mx), {})
+                if door_st.get('open'):
+                    continue
+                tex_arr = self._door_arr
+            elif cell == CELL_EXITDOOR:
+                sv = min(255, sv + pulse_exit)
+                tex_arr = self._exit_arr
+            elif cell == CELL_WALL and (hit_mx, hit_my) in self.wall_art:
+                art_idx = self.wall_art[(hit_mx, hit_my)]
+                tex_arr = self._art_arrs[art_idx]
+                if tex_arr is None:
+                    tex_arr = self._wall_arr
+            else:
+                tex_arr = self._wall_arr
+
+            if tex_arr is None:
+                continue
+
+            tc = int(wx_hit * TEX) % TEX   # texture column
+
+            # Sample texture column and scale to wall_h via nearest-neighbour
+            wall_seg_h = y1 - y0
+            # Source row indices into the TEX-tall texture column
+            src_rows = (np.arange(wall_seg_h, dtype=np.float32)
+                        * TEX / wall_h
+                        + max(0, -HH + wall_h//2)).astype(np.int32)
+            src_rows = np.clip(src_rows, 0, TEX - 1)
+
+            # tex_arr shape: (TEX_W, TEX_H, 3) -- column-major surfarray
+            texel = tex_arr[tc, src_rows, :]   # (wall_seg_h, 3)
+
+            # Shading: multiply by sv/255
+            lit = (texel.astype(np.uint32) * sv // 255).astype(np.uint8)
+
+            # Fog blend
+            if fog_t > 0.05:
+                fv      = int(fog_t * 55)
+                fog_col = np.array([
+                    min(255, fr + fv),
+                    min(255, fg2 + fv // 3),
+                    min(255, fb2 + fv // 2)
+                ], dtype=np.uint32)
+                fog_a   = int(fog_t * 140)
+                lit     = ((lit.astype(np.uint32) * (255 - fog_a)
+                            + fog_col * fog_a) // 255).astype(np.uint8)
+
+            # Write into framebuffer for all sw pixel columns
+            fb[x_start:x_end, y0:y1, :] = lit[np.newaxis, :, :]
+
+        # Single blit of entire wall framebuffer onto screen
+        # surfarray expects (WIDTH, HEIGHT, 3) and screen is the render target
+        wall_surf = pygame.surfarray.make_surface(fb)
+        self.screen.blit(wall_surf, (0, 0))
+
+    # ------------------------------------------------------------------
+    def _cast_rays_pygame(self, num_rays, sw, FOG_START, FOG_END, fog_rgb, tick):
+        """Original per-Surface fallback for systems without numpy."""
+        tick_val = tick
+        pulse_exit = int(abs(math.sin(tick_val * 0.003)) * 60)
+
+        for ray in range(num_rays):
+            ra  = (self.angle - HALF_FOV) + ray * (FOV / num_rays)
             dist, cell, wx, side = dda_cast(
-                self.px, self.py, ra, self.grid, self.MAP_W, self.MAP_H,
+                self.px, self.py, ra,
+                self.grid, self.MAP_W, self.MAP_H,
                 self.door_states, max_depth=self.draw_distance)
 
             for i in range(sw):
@@ -2733,22 +2879,18 @@ class Game:
             wall_h = int((TILE_SIZE * HEIGHT * 1.9) / (dist + 0.1))
             wt     = (HEIGHT // 2) - (wall_h // 2)
 
-            ss = 0.58 if side == 0 else 1.0
+            ss    = 0.58 if side == 0 else 1.0
             atten = max(0.04, ss / (1.0 + dist * 0.0012))
             fog_t = max(0.0, min(1.0, (dist - FOG_START) / max(1, FOG_END - FOG_START)))
-            sv = int(atten * 255 * (1.0 - fog_t * 0.88))
-            sv = max(10, min(255, sv))
+            sv    = max(10, min(255, int(atten * 255 * (1.0 - fog_t * 0.88))))
 
             tc = int(wx * self.TEX_SIZE) % self.TEX_SIZE
 
-            cos_a = math.cos(ra)
-            sin_a = math.sin(ra)
+            cos_a = math.cos(ra); sin_a = math.sin(ra)
             if abs(cos_a) < 1e-9: cos_a = 1e-9
             if abs(sin_a) < 1e-9: sin_a = 1e-9
-            hit_mx = int((self.px + cos_a * dist) / TILE_SIZE)
-            hit_my = int((self.py + sin_a * dist) / TILE_SIZE)
-            hit_mx = max(0, min(self.MAP_W - 1, hit_mx))
-            hit_my = max(0, min(self.MAP_H - 1, hit_my))
+            hit_mx = max(0, min(self.MAP_W-1, int((self.px + cos_a*dist)/TILE_SIZE)))
+            hit_my = max(0, min(self.MAP_H-1, int((self.py + sin_a*dist)/TILE_SIZE)))
 
             if cell == CELL_DOOR:
                 door_st = self.door_states.get((hit_my, hit_mx), {})
@@ -2756,9 +2898,8 @@ class Game:
                     continue
                 cols = self._door_cols
             elif cell == CELL_EXITDOOR:
-                pulse = int(abs(math.sin(tick * 0.003)) * 60)
-                sv    = min(255, sv + pulse)
-                cols  = self._exit_cols
+                sv   = min(255, sv + pulse_exit)
+                cols = self._exit_cols
             elif cell == CELL_WALL and (hit_mx, hit_my) in self.wall_art:
                 art_idx = self.wall_art[(hit_mx, hit_my)]
                 cols = self._art_cols[art_idx]
@@ -2767,21 +2908,18 @@ class Game:
 
             if wall_h > 0 and 0 <= tc < len(cols):
                 col = pygame.transform.scale(cols[tc], (sw + 1, max(1, wall_h)))
-                sh = pygame.Surface(col.get_size())
+                sh  = pygame.Surface(col.get_size())
                 sh.fill((sv, sv, sv))
                 col.blit(sh, (0, 0), special_flags=pygame.BLEND_RGB_MULT)
                 if fog_t > 0.05:
                     fv = int(fog_t * 55)
-                    fg = pygame.Surface(col.get_size())
-                    fg.fill((min(255, fog_rgb[0] + fv),
-                              min(255, fog_rgb[1] + fv // 3),
-                              min(255, fog_rgb[2] + fv // 2)))
-                    fg.set_alpha(int(fog_t * 140))
-                    col.blit(fg, (0, 0))
+                    fg_surf = pygame.Surface(col.get_size())
+                    fg_surf.fill((min(255, fog_rgb[0] + fv),
+                                  min(255, fog_rgb[1] + fv // 3),
+                                  min(255, fog_rgb[2] + fv // 2)))
+                    fg_surf.set_alpha(int(fog_t * 140))
+                    col.blit(fg_surf, (0, 0))
                 self.screen.blit(col, (ray * sw, wt))
-
-        while len(self.z_buffer) < WIDTH:
-            self.z_buffer.append(float('inf'))
 
     # ------------------------------------------------------------------
     # Draw sprites
@@ -3926,6 +4064,20 @@ class Game:
         pygame.draw.rect(self.screen, border_col, (ox, oy, mw, mh), 1)
 
 
+    def _has_los(self, ax, ay, bx, by):
+        """Return True if there is unobstructed line-of-sight from (ax,ay) to (bx,by)."""
+        dx = bx - ax
+        dy = by - ay
+        dist = math.hypot(dx, dy)
+        if dist < 1:
+            return True
+        angle_to = math.atan2(dy, dx)
+        hit_dist, _, _, _ = dda_cast(
+            ax, ay, angle_to,
+            self.grid, self.MAP_W, self.MAP_H, self.door_states
+        )
+        return hit_dist >= dist - TILE_SIZE * 0.5
+
     def handle_input(self):
         keys = pygame.key.get_pressed()
         self.is_moving = False
@@ -4260,6 +4412,33 @@ class Game:
     # Tick
     # ------------------------------------------------------------------
     def tick(self, events):
+        # If win condition was already set on a previous tick, keep fading to black
+        # and return as soon as the fade completes. This is checked first so nothing
+        # else in tick() can accidentally clear or reset the win state.
+        if self.game_won:
+            self.level_fade = min(260, self.level_fade + 5)
+            # Still render the fade overlay so the transition looks clean
+            self.screen.fill((0, 0, 0))
+            global _GLOW_ENABLED
+            _GLOW_ENABLED = self.glow_effects
+            if self.boss_intro_timer == 0:
+                self.draw_floor_and_ceiling()
+                self.cast_rays()
+                self.draw_sprites()
+            fade = pygame.Surface((WIDTH, HEIGHT))
+            fade.fill((0, 0, 0))
+            fade.set_alpha(min(255, self.level_fade))
+            self.screen.blit(fade, (0, 0))
+            if self.level_fade < 160:
+                draw_glowing_text(self.screen, "DRACULA IS SLAIN!", self.big_font,
+                                  COL_BOSS_BRIGHT, WIDTH//2, HEIGHT//2-20, centered=True)
+                draw_glowing_text(self.screen, "She crumbles to dust...", self.font,
+                                  COL_GOLD, WIDTH//2, HEIGHT//2+30, centered=True)
+            if self.level_fade >= 255:
+                self._release_mouse()
+                return 'game_won'
+            return None  # keep ticking the fade
+
         for ev in events:
             if ev.type == pygame.MOUSEWHEEL:
                 self._pending_scroll = -ev.y  # scroll down = next weapon
@@ -4316,12 +4495,10 @@ class Game:
             if self.level_fade >= 255:
                 self._release_mouse()
                 return 'next_level'
-
-        if self.game_won:
-            self.level_fade += 4
-            if self.level_fade >= 255:
-                self._release_mouse()
-                return 'game_won'
+            # Also return immediately the first tick game_won is set
+            # (level_fade starts at 0, so first tick it's 4 -- return after brief flash)
+            if self.level_fade <= 8:
+                pass  # let the first frame render the "DRACULA IS SLAIN" overlay
 
         self.screen.fill((0, 0, 0))
         # Apply glow setting globally
@@ -4368,17 +4545,6 @@ class Game:
             self.screen.blit(fade, (0, 0))
             msg = self.big_font.render(f"LEVEL {self.level} COMPLETE", True, COL_GOLD)
             self.screen.blit(msg, msg.get_rect(center=(WIDTH//2, HEIGHT//2)))
-
-        if self.game_won:
-            fade = pygame.Surface((WIDTH, HEIGHT))
-            fade.fill((0, 0, 0))
-            fade.set_alpha(min(255, self.level_fade))
-            self.screen.blit(fade, (0, 0))
-            if self.level_fade < 180:
-                draw_glowing_text(self.screen, "DRACULA IS SLAIN!", self.big_font,
-                                  COL_BOSS_BRIGHT, WIDTH//2, HEIGHT//2-20, centered=True)
-                draw_glowing_text(self.screen, "She crumbles to dust...", self.font,
-                                  COL_GOLD, WIDTH//2, HEIGHT//2+30, centered=True)
 
         if self.show_fps:
             fps_val = int(self.clock.get_fps())

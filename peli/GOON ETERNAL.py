@@ -935,7 +935,9 @@ def extract_cols(tex, size):
 # ---------------------------------------------------------------------------
 # DDA raycaster
 # ---------------------------------------------------------------------------
-def dda_cast(px, py, angle, grid, map_w, map_h, door_states=None):
+def dda_cast(px, py, angle, grid, map_w, map_h, door_states=None, max_depth=None):
+    if max_depth is None:
+        max_depth = MAX_DEPTH
     cos_a = math.cos(angle)
     sin_a = math.sin(angle)
     if abs(cos_a) < 1e-9: cos_a = 1e-9
@@ -957,13 +959,13 @@ def dda_cast(px, py, angle, grid, map_w, map_h, door_states=None):
         sy=1; sdy=((my+1)*TILE_SIZE - py)/abs(sin_a)
 
     side=0
-    for _ in range(MAX_DEPTH):
+    for _ in range(max_depth):
         if sdx < sdy:
             sdx+=ddx; mx+=sx; side=0
         else:
             sdy+=ddy; my+=sy; side=1
         if mx<0 or mx>=map_w or my<0 or my>=map_h:
-            return MAX_DEPTH*TILE_SIZE, CELL_WALL, 0.0, 0
+            return max_depth*TILE_SIZE, CELL_WALL, 0.0, 0
         cell=grid[my][mx]
         if cell in (CELL_WALL, CELL_DOOR, CELL_EXITDOOR):
             if cell == CELL_DOOR and door_states and door_states.get((my, mx), {}).get('open'):
@@ -977,7 +979,7 @@ def dda_cast(px, py, angle, grid, map_w, map_h, door_states=None):
             wx-=math.floor(wx)
             return perp, cell, wx, side
 
-    return MAX_DEPTH*TILE_SIZE, CELL_WALL, 0.0, 0
+    return max_depth*TILE_SIZE, CELL_WALL, 0.0, 0
 
 
 # ---------------------------------------------------------------------------
@@ -1058,21 +1060,24 @@ def draw_gradient_rect(surf, color1, color2, rect, vertical=True, horizontal=Non
             col = (r, g, b, int(color1[3] + (color2[3]-color1[3])*t)) if has_alpha else (r, g, b)
             pygame.draw.line(surf, col, (x+i,y), (x+i,y+h))
 
+_GLOW_ENABLED = True   # set by Game based on settings['glow_effects']
+
 def draw_glowing_text(surf, text, font, color, x, y, glow_color=None, glow_radius=3, centered=False):
     if glow_color is None:
         glow_color = tuple(min(255, c//2) for c in color)
     if centered:
         base = font.render(text, True, color)
         x = x - base.get_width()//2
-    for dx in range(-glow_radius, glow_radius+1):
-        for dy in range(-glow_radius, glow_radius+1):
-            if dx == 0 and dy == 0: continue
-            dist = math.sqrt(dx*dx + dy*dy)
-            if dist > glow_radius: continue
-            alpha = int(180 * (1 - dist/glow_radius))
-            glow_surf = font.render(text, True, glow_color)
-            glow_surf.set_alpha(alpha)
-            surf.blit(glow_surf, (x+dx, y+dy))
+    if _GLOW_ENABLED:
+        for dx in range(-glow_radius, glow_radius+1):
+            for dy in range(-glow_radius, glow_radius+1):
+                if dx == 0 and dy == 0: continue
+                dist = math.sqrt(dx*dx + dy*dy)
+                if dist > glow_radius: continue
+                alpha = int(180 * (1 - dist/glow_radius))
+                glow_surf = font.render(text, True, glow_color)
+                glow_surf.set_alpha(alpha)
+                surf.blit(glow_surf, (x+dx, y+dy))
     txt = font.render(text, True, color)
     surf.blit(txt, (x, y))
     return txt.get_width()
@@ -1112,7 +1117,9 @@ class Game:
                  mouse_sensitivity=MOUSE_SENSITIVITY,
                  carried_upgrades=None, carried_tokens=0,
                  run_seed=0, demo_mode=False,
-                 screen_shake_enabled=True):
+                 screen_shake_enabled=True,
+                 ray_divisor=1, draw_distance=40,
+                 glow_effects=True, floor_detail=True):
         self.screen     = screen
         self.level      = level
         self.run_seed   = run_seed
@@ -1120,6 +1127,10 @@ class Game:
         self.is_boss_level     = (level == BOSS_LEVEL)
         self.is_miniboss_level = (level == MINI_BOSS_LEVEL)
         self.screen_shake_enabled = screen_shake_enabled
+        self.ray_divisor   = max(1, ray_divisor)   # 1/2/4 -- divides NUM_RAYS
+        self.draw_distance = max(10, draw_distance) # replaces global MAX_DEPTH
+        self.glow_effects  = glow_effects
+        self.floor_detail  = floor_detail
 
         self.sound_volume = sound_volume
         self.sfx_volume   = sfx_volume
@@ -2782,6 +2793,11 @@ class Game:
     # ------------------------------------------------------------------
     def draw_floor_and_ceiling(self):
         hh  = HEIGHT // 2
+        # Low quality: flat colours only (very fast)
+        if not self.floor_detail:
+            self.screen.blit(self.sky_surf, (0, 0))
+            pygame.draw.rect(self.screen, (100,60,25), (0, hh, WIDTH, hh))
+            return
         tw  = self.wood_tex.get_width()
         th  = self.wood_tex.get_height()
         cw  = self.ceil_tex.get_width()
@@ -2826,14 +2842,14 @@ class Game:
     # Cast rays (DDA)
     # ------------------------------------------------------------------
     def cast_rays(self):
-        # NUM_RAYS == WIDTH so sw == 1: one ray per pixel column = maximum sharpness
+        num_rays = max(1, NUM_RAYS // self.ray_divisor)
+        sw = max(1, WIDTH // num_rays)
         self.z_buffer = []
-        sw   = max(1, WIDTH // NUM_RAYS)
         tick = pygame.time.get_ticks()
 
-        # Fog parameters tuned for wider FOV and longer draw distance
+        fog_end = self.draw_distance * TILE_SIZE
         FOG_START = TILE_SIZE * 3
-        FOG_END   = MAX_DEPTH * TILE_SIZE
+        FOG_END   = fog_end
         if self.is_boss_level:
             fog_rgb = (40, 0, 15)
         elif self.is_miniboss_level:
@@ -2841,9 +2857,11 @@ class Game:
         else:
             fog_rgb = (8, 0, 18)
 
-        for ray in range(NUM_RAYS):
-            ra = (self.angle - HALF_FOV) + ray * (FOV / NUM_RAYS)
-            dist, cell, wx, side = dda_cast(self.px, self.py, ra, self.grid, self.MAP_W, self.MAP_H, self.door_states)
+        for ray in range(num_rays):
+            ra = (self.angle - HALF_FOV) + ray * (FOV / num_rays)
+            dist, cell, wx, side = dda_cast(
+                self.px, self.py, ra, self.grid, self.MAP_W, self.MAP_H,
+                self.door_states, max_depth=self.draw_distance)
 
             for i in range(sw):
                 if ray * sw + i < WIDTH:
@@ -2852,7 +2870,6 @@ class Game:
             wall_h = int((TILE_SIZE * HEIGHT * 1.9) / (dist + 0.1))
             wt     = (HEIGHT // 2) - (wall_h // 2)
 
-            # Directional shading: N/S walls slightly darker than E/W
             ss = 0.58 if side == 0 else 1.0
             atten = max(0.04, ss / (1.0 + dist * 0.0012))
             fog_t = max(0.0, min(1.0, (dist - FOG_START) / max(1, FOG_END - FOG_START)))
@@ -4268,12 +4285,6 @@ class Game:
         if self.ammo_pistol < 10:
             self.ammo_pistol = min(30, self.max_ammo_pistol)
 
-        self._demo_tick += 1
-        T = self._demo_tick
-
-        def world(tx, ty):
-            return tx * TILE_SIZE + TILE_SIZE // 2, ty * TILE_SIZE + TILE_SIZE // 2
-
     def handle_input(self):
         keys = pygame.key.get_pressed()
         self.is_moving = False
@@ -4684,6 +4695,9 @@ class Game:
                 return 'game_won'
 
         self.screen.fill((0, 0, 0))
+        # Apply glow setting globally
+        global _GLOW_ENABLED
+        _GLOW_ENABLED = self.glow_effects
         # Apply screen shake offset via a subsurface offset blit
         ox, oy = self._shake_ox, self._shake_oy
         if ox or oy:
@@ -4774,6 +4788,12 @@ def load_settings():
         'sfx_mode': 'normal',
         'mouse_sensitivity': MOUSE_SENSITIVITY,
         'screen_shake_enabled': True,
+        # Graphics quality
+        'ray_divisor': 1,      # 1=full, 2=half, 4=quarter rays
+        'draw_distance': 40,   # MAX_DEPTH tiles (40/25/15)
+        'glow_effects': True,  # draw_glowing_text glow passes
+        'floor_detail': True,  # textured floor/ceiling vs flat
+        'render_scale': 1,     # reserved for future downscale
     }
     try:
         with open(SETTINGS_FILE, 'r') as f:
@@ -4999,7 +5019,7 @@ def show_win_screen(screen, font, big_font, small_font, score, speedrun_time, to
 # ---------------------------------------------------------------------------
 # Menus
 # ---------------------------------------------------------------------------
-def show_main_menu(screen, font, small_font):
+def show_main_menu(screen, font, small_font, tiny_font=None, settings=None):
     pygame.mouse.set_visible(True)
     pygame.event.set_grab(False)
 
@@ -5020,10 +5040,11 @@ def show_main_menu(screen, font, small_font):
     btn_width, btn_height = 260, 56
     start_y = HEIGHT//2 - 10
     btns = [
-        {"text": "NEW GAME", "action": "new",  "rect": pygame.Rect(WIDTH//2 - btn_width//2, start_y,       btn_width, btn_height)},
-        {"text": "LOAD GAME","action": "load", "rect": pygame.Rect(WIDTH//2 - btn_width//2, start_y + 76,  btn_width, btn_height)},
-        {"text": "[ DEMO ]", "action": "demo", "rect": pygame.Rect(WIDTH//2 - btn_width//2, start_y + 152, btn_width, btn_height)},
-        {"text": "EXIT",     "action": "exit", "rect": pygame.Rect(WIDTH//2 - btn_width//2, start_y + 228, btn_width, btn_height)},
+        {"text": "NEW GAME",  "action": "new",      "rect": pygame.Rect(WIDTH//2 - btn_width//2, start_y,       btn_width, btn_height)},
+        {"text": "LOAD GAME", "action": "load",     "rect": pygame.Rect(WIDTH//2 - btn_width//2, start_y + 66,  btn_width, btn_height)},
+        {"text": "[ DEMO ]",  "action": "demo",     "rect": pygame.Rect(WIDTH//2 - btn_width//2, start_y + 132, btn_width, btn_height)},
+        {"text": "SETTINGS",  "action": "settings", "rect": pygame.Rect(WIDTH//2 - btn_width//2, start_y + 198, btn_width, btn_height)},
+        {"text": "EXIT",      "action": "exit",     "rect": pygame.Rect(WIDTH//2 - btn_width//2, start_y + 264, btn_width, btn_height)},
     ]
 
     clock = pygame.time.Clock()
@@ -5090,6 +5111,10 @@ def show_main_menu(screen, font, small_font):
                         msg_timer = 90
                     else:
                         return "load"
+                elif b["action"] == "settings":
+                    if settings is not None and tiny_font is not None:
+                        show_graphics_settings(screen, font, small_font, tiny_font, settings)
+                    # Don't return -- stay in menu
                 elif b["action"] == "exit":
                     pygame.quit()
                     sys.exit()
@@ -5152,6 +5177,99 @@ def show_main_menu(screen, font, small_font):
                     val = small_font.render(format_time(entry2.get('time', 0)), True, (160,220,160))
                 screen.blit(rk,  (hs_x + 8,  ry2))
                 screen.blit(val, (hs_x + 44, ry2))
+
+        pygame.display.flip()
+        clock.tick(FPS)
+
+
+def show_graphics_settings(screen, font, small_font, tiny_font, settings):
+    """Standalone graphics settings screen -- no active Game needed."""
+    overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+    overlay.fill((0, 0, 0, 210))
+    bg = screen.copy()
+    clock = pygame.time.Clock()
+
+    # Cycling option helpers
+    ray_opts   = [(1, 'Full (best)'), (2, 'Half (fast)'), (4, 'Quarter (fastest)')]
+    dist_opts  = [(40, 'Far (40)'), (25, 'Medium (25)'), (15, 'Near (15)')]
+    floor_opts = [(True, 'Textured'), (False, 'Flat (fast)')]
+    glow_opts  = [(True, 'On'), (False, 'Off (fast)')]
+
+    def cycle(opts, key):
+        vals = [o[0] for o in opts]
+        cur  = settings.get(key, vals[0])
+        try:    idx = vals.index(cur)
+        except: idx = 0
+        settings[key] = vals[(idx + 1) % len(opts)]
+
+    def label(opts, key):
+        vals = [o[0] for o in opts]
+        cur  = settings.get(key, vals[0])
+        try:    idx = vals.index(cur)
+        except: idx = 0
+        return opts[idx][1]
+
+    rows = [
+        ('Ray Quality',   'ray_divisor',  ray_opts),
+        ('Draw Distance', 'draw_distance', dist_opts),
+        ('Floor Detail',  'floor_detail',  floor_opts),
+        ('Glow Effects',  'glow_effects',  glow_opts),
+    ]
+
+    btn_w, btn_h = 320, 48
+    bx = WIDTH//2 - btn_w//2
+    by_start = HEIGHT//2 - (len(rows) * 58)//2
+
+    back_btn = pygame.Rect(WIDTH//2 - 120, by_start + len(rows)*58 + 20, 240, 48)
+
+    while True:
+        screen.blit(bg, (0, 0))
+        screen.blit(overlay, (0, 0))
+        mx, my = pygame.mouse.get_pos()
+        click = False
+
+        for ev in pygame.event.get():
+            if ev.type == pygame.QUIT:
+                pygame.quit(); sys.exit()
+            if ev.type == pygame.MOUSEBUTTONDOWN and ev.button == 1:
+                click = True
+            if ev.type == pygame.KEYDOWN and ev.key == pygame.K_ESCAPE:
+                save_settings(settings)
+                return
+
+        draw_glowing_text(screen, "GRAPHICS SETTINGS", font, (180, 100, 255),
+                          WIDTH//2, by_start - 60, glow_color=(80, 0, 120), centered=True)
+
+        hint = tiny_font.render("Changes apply immediately on next level load.", True, (120, 90, 160))
+        screen.blit(hint, hint.get_rect(center=(WIDTH//2, by_start - 28)))
+
+        for i, (row_label, key, opts) in enumerate(rows):
+            ry = by_start + i * 58
+            btn_rect = pygame.Rect(bx, ry, btn_w, btn_h)
+            hov = btn_rect.collidepoint(mx, my)
+            pygame.draw.rect(screen, (70, 18, 110) if hov else (25, 8, 40), btn_rect, border_radius=8)
+            pygame.draw.rect(screen, (200, 80, 255) if hov else (90, 30, 130), btn_rect, 2, border_radius=8)
+
+            lbl_t = small_font.render(row_label, True, (200, 170, 230))
+            val_t = font.render(label(opts, key), True, COL_GOLD if hov else COL_WHITE)
+            screen.blit(lbl_t, (btn_rect.x + 12, btn_rect.y + 6))
+            screen.blit(val_t, (btn_rect.x + 12, btn_rect.y + 22))
+
+            arr = small_font.render("< click to change >", True, (120, 80, 160))
+            screen.blit(arr, arr.get_rect(midright=(btn_rect.right - 10, btn_rect.centery)))
+
+            if click and hov:
+                cycle(opts, key)
+                save_settings(settings)
+
+        hov_back = back_btn.collidepoint(mx, my)
+        pygame.draw.rect(screen, (120, 10, 60) if hov_back else (50, 5, 30), back_btn, border_radius=8)
+        pygame.draw.rect(screen, (255, 100, 180) if hov_back else COL_ACCENT, back_btn, 2, border_radius=8)
+        bt = font.render("Back  [Esc]", True, COL_WHITE)
+        screen.blit(bt, bt.get_rect(center=back_btn.center))
+        if click and hov_back:
+            save_settings(settings)
+            return
 
         pygame.display.flip()
         clock.tick(FPS)
@@ -5271,6 +5389,32 @@ def show_settings_menu(screen, font, small_font, tiny_font, game):
         shake_col = (160,255,160) if shake_on else (255,140,140)
         stxt = small_font.render(shake_lbl_txt, True, shake_col)
         screen.blit(stxt, stxt.get_rect(center=shake_btn.center))
+
+        # Graphics settings shortcut
+        gfx_btn = pygame.Rect(WIDTH//2 - 120, HEIGHT//2 + 205, 240, 40)
+        gfx_hov = gfx_btn.collidepoint(mx, my)
+        pygame.draw.rect(screen, (30,10,50) if not gfx_hov else (60,18,90), gfx_btn, border_radius=8)
+        pygame.draw.rect(screen, (140,50,200) if not gfx_hov else (200,80,255), gfx_btn, 2, border_radius=8)
+        gtxt = small_font.render("Graphics Settings", True, (200,160,255))
+        screen.blit(gtxt, gtxt.get_rect(center=gfx_btn.center))
+        if click and gfx_hov:
+            # Build a temporary settings dict from game state to pass through
+            gfx_settings = {
+                'ray_divisor':   game.ray_divisor,
+                'draw_distance': game.draw_distance,
+                'floor_detail':  game.floor_detail,
+                'glow_effects':  game.glow_effects,
+                'sound_volume':  game.sound_volume,
+                'sfx_volume':    game.sfx_volume,
+                'sfx_mode':      game.sfx_mode,
+                'mouse_sensitivity': game.mouse_sensitivity,
+                'screen_shake_enabled': game.screen_shake_enabled,
+            }
+            show_graphics_settings(screen, font, small_font, tiny_font, gfx_settings)
+            game.ray_divisor   = gfx_settings['ray_divisor']
+            game.draw_distance = gfx_settings['draw_distance']
+            game.floor_detail  = gfx_settings['floor_detail']
+            game.glow_effects  = gfx_settings['glow_effects']
 
         hovered = back_btn.collidepoint(mx, my)
         if hovered:
@@ -5527,7 +5671,7 @@ def main():
 
     while True:
         pygame.mixer.music.stop()
-        menu_action = show_main_menu(screen, font, small_font)
+        menu_action = show_main_menu(screen, font, small_font, tiny_font, settings)
 
         level = 1
         prev_score = 0
@@ -5559,17 +5703,22 @@ def main():
                 show_loading_screen(screen, font, small_font, DEMO_LEVEL)
                 demo_game = Game(
                     screen, level=DEMO_LEVEL, prev_score=0,
-                    carried_health=50, carried_ammo=99,
+                    carried_health=50,
+                    carried_ammo={'pistol': 99, 'shotgun': 40, 'smg': 200},
                     speedrun_start=time.time(), total_kills=0,
                     sound_volume=settings['sound_volume'],
                     sfx_volume=settings['sfx_volume'],
                     sfx_mode=settings['sfx_mode'],
                     mouse_sensitivity=settings['mouse_sensitivity'],
-                    carried_upgrades={'damage': 2, 'firerate': 2, 'health': 0,
-                                      'stamina': 0, 'stamina_recovery': 0, 'ammo_cap': 0},
+                    carried_upgrades={
+                        'damage': 2, 'firerate': 2, 'health': 0,
+                        'stamina': 0, 'stamina_recovery': 0, 'ammo_cap': 0,
+                        'armor': 0, 'ricochet': 0, 'lifesteal': 0,
+                    },
                     carried_tokens=0,
                     run_seed=random.randint(0, 2**31),
                     demo_mode=True,
+                    screen_shake_enabled=settings['screen_shake_enabled'],
                 )
                 pygame.mouse.set_visible(True)
                 pygame.event.set_grab(False)
@@ -5619,6 +5768,10 @@ def main():
                 carried_tokens=carried_tokens,
                 run_seed=run_seed,
                 screen_shake_enabled=settings['screen_shake_enabled'],
+                ray_divisor=settings.get('ray_divisor', 1),
+                draw_distance=settings.get('draw_distance', 40),
+                glow_effects=settings.get('glow_effects', True),
+                floor_detail=settings.get('floor_detail', True),
             )
             load_data = None
             if speedrun_start is None:
@@ -5642,6 +5795,10 @@ def main():
                     settings['sfx_mode']     = game.sfx_mode
                     settings['mouse_sensitivity'] = game.mouse_sensitivity
                     settings['screen_shake_enabled'] = game.screen_shake_enabled
+                    settings['ray_divisor']   = game.ray_divisor
+                    settings['draw_distance'] = game.draw_distance
+                    settings['glow_effects']  = game.glow_effects
+                    settings['floor_detail']  = game.floor_detail
                     save_settings(settings)
                     if pause_action == 'menu':
                         in_game = False
@@ -5681,6 +5838,10 @@ def main():
                     settings['sfx_mode']     = game.sfx_mode
                     settings['mouse_sensitivity'] = game.mouse_sensitivity
                     settings['screen_shake_enabled'] = game.screen_shake_enabled
+                    settings['ray_divisor']   = game.ray_divisor
+                    settings['draw_distance'] = game.draw_distance
+                    settings['glow_effects']  = game.glow_effects
+                    settings['floor_detail']  = game.floor_detail
                     save_settings(settings)
                     level += 1
                     break
